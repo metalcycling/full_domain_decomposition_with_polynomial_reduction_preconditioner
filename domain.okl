@@ -1,0 +1,264 @@
+/*
+ * Domain kernels file
+ */
+
+@kernel void stiffness_matrix_1(DType **GDu, const DType *u, const DType *D_hat, const DType **G, const int num_points, const int poly_degree)
+{
+    for (int idx = 0; idx < num_points; idx++; @tile(BLOCK_SIZE, @outer, @inner))
+    {
+        int n_x = poly_degree + 1;
+        int n_xy = n_x * n_x;
+        int num_elem_points = (DIM == 2) ? n_x * n_x : n_x * n_x * n_x;
+
+        int e = idx / num_elem_points;
+        int v = idx % num_elem_points;
+
+#if DIM == 2
+        int i = v % n_x;
+        int j = v / n_x;
+
+        DType Du_1 = 0.0;
+        DType Du_2 = 0.0;
+
+        for (int k = 0; k < n_x; k++)
+        {
+            Du_1 += D_hat[k + i * n_x] * u[e * num_elem_points + (k + j * n_x)];
+            Du_2 += D_hat[k + j * n_x] * u[e * num_elem_points + (i + k * n_x)];
+        }
+
+        GDu[0][idx] = G[0][idx] * Du_1 + G[2][idx] * Du_2;
+        GDu[1][idx] = G[2][idx] * Du_1 + G[1][idx] * Du_2;
+#else
+        int i = v % n_x;
+        int j = (v / n_x) % n_x;
+        int k = v / n_xy;
+
+        DType Du_1 = 0.0;
+        DType Du_2 = 0.0;
+        DType Du_3 = 0.0;
+
+        for (int p = 0; p < n_x; p++)
+        {
+            Du_1 += D_hat[p + i * n_x] * u[e * num_elem_points + (p + j * n_x + k * n_xy)];
+            Du_2 += D_hat[p + j * n_x] * u[e * num_elem_points + (i + p * n_x + k * n_xy)];
+            Du_3 += D_hat[p + k * n_x] * u[e * num_elem_points + (i + j * n_x + p * n_xy)];
+        }
+
+        GDu[0][idx] = G[0][idx] * Du_1 + G[3][idx] * Du_2 + G[4][idx] * Du_3;
+        GDu[1][idx] = G[3][idx] * Du_1 + G[1][idx] * Du_2 + G[5][idx] * Du_3;
+        GDu[2][idx] = G[4][idx] * Du_1 + G[5][idx] * Du_2 + G[2][idx] * Du_3;
+#endif
+    }
+}
+
+@kernel void stiffness_matrix_2(DType *Au, const DType **GDu, const DType *D_hat, const int num_points, const int poly_degree)
+{
+    for (int idx = 0; idx < num_points; idx++; @tile(BLOCK_SIZE, @outer, @inner))
+    {
+        int n_x = poly_degree + 1;
+        int n_xy = n_x * n_x;
+        int num_elem_points = (DIM == 2) ? n_x * n_x : n_x * n_x * n_x;
+
+        int e = idx / num_elem_points;
+        int v = idx % num_elem_points;
+
+#if DIM == 2
+        int i = v % n_x;
+        int j = v / n_x;
+
+        DType Au_1 = 0.0;
+        DType Au_2 = 0.0;
+
+        for (int k = 0; k < n_x; k++)
+        {
+            Au_1 += D_hat[i + k * n_x] * GDu[0][e * num_elem_points + (k + j * n_x)];
+            Au_2 += D_hat[j + k * n_x] * GDu[1][e * num_elem_points + (i + k * n_x)];
+        }
+
+        Au[idx] = Au_1 + Au_2;
+#else
+        int i = v % n_x;
+        int j = (v / n_x) % n_x;
+        int k = v / n_xy;
+
+        DType Au_1 = 0.0;
+        DType Au_2 = 0.0;
+        DType Au_3 = 0.0;
+
+        for (int p = 0; p < n_x; p++)
+        {
+            Au_1 += D_hat[i + p * n_x] * GDu[0][e * num_elem_points + (p + j * n_x + k * n_xy)];
+            Au_2 += D_hat[j + p * n_x] * GDu[1][e * num_elem_points + (i + p * n_x + k * n_xy)];
+            Au_3 += D_hat[k + p * n_x] * GDu[2][e * num_elem_points + (i + j * n_x + p * n_xy)];
+        }
+
+        Au[idx] = Au_1 + Au_2 + Au_3;
+#endif
+    }
+}
+
+@kernel void initialize_arrays(DType *u_k, DType *r_k, DType *f, const int num_points)
+{   
+    for (int idx = 0; idx < num_points; idx++; @tile(BLOCK_SIZE, @outer, @inner))
+    {
+        u_k[idx] = 0.0;
+        r_k[idx] = f[idx];
+    }
+}
+
+@kernel void residual_norm(DType *block, const DType *r_k, const DType *QQt_r_k, const DType *dirichlet_mask, const int num_points, const int num_blocks)
+{
+    for (int group = 0; group < num_blocks; ++group; @outer)
+    {
+        @shared DType r_norm[BLOCK_SIZE];
+
+        for (int item = 0; item < BLOCK_SIZE; ++item; @inner)
+        {
+            int idx = group * BLOCK_SIZE + item;
+
+            if (idx < num_points)
+                r_norm[item] = r_k[idx] * QQt_r_k[idx] * dirichlet_mask[idx];
+            else
+                r_norm[item] = 0.0;
+        }
+
+        for (int alive = ((BLOCK_SIZE + 1) / 2); 0 < alive; alive /= 2)
+        {
+            for (int item = 0; item < BLOCK_SIZE; ++item; @inner)
+            {
+                if (item < alive) r_norm[item] += r_norm[item + alive];
+            }
+        }
+
+        for (int item = 0; item < BLOCK_SIZE; ++item; @inner)
+        {
+            if (item == 0) block[group] = r_norm[0];
+        }
+    }
+}
+
+@kernel void projection_inner_products(DType *block, const DType *z_k, const DType *r_k, const DType *p_k, const DType *q_k, const int num_points, const int num_blocks)
+{
+    for (int group = 0; group < num_blocks; ++group; @outer)
+    {
+        @shared DType gamma_sum[BLOCK_SIZE];
+        @shared DType theta_sum[BLOCK_SIZE];
+
+        for (int item = 0; item < BLOCK_SIZE; ++item; @inner)
+        {
+            int idx = group * BLOCK_SIZE + item;
+
+            if (idx < num_points)
+            {
+                gamma_sum[item] = z_k[idx] * r_k[idx];
+                theta_sum[item] = p_k[idx] * q_k[idx];
+            }
+            else
+            {
+                gamma_sum[item] = 0.0;
+                theta_sum[item] = 0.0;
+            }
+        }
+
+        for (int alive = ((BLOCK_SIZE + 1) / 2); 0 < alive; alive /= 2)
+        {
+            for (int item = 0; item < BLOCK_SIZE; ++item; @inner)
+            {
+                if (item < alive)
+                {
+                    gamma_sum[item] += gamma_sum[item + alive];
+                    theta_sum[item] += theta_sum[item + alive];
+                }
+            }
+        }
+
+        for (int item = 0; item < BLOCK_SIZE; ++item; @inner)
+        {
+            if (item == 0)
+            {
+                block[group] = gamma_sum[0];
+                block[group + num_blocks] = theta_sum[0];
+            }
+        }
+    }
+}
+
+@kernel void solution_and_residual_update(DType *u_k, DType *r_kp1, DType *r_k, DType *p_k, DType *q_k, DType alpha_k, const int num_points)
+{
+    for (int idx = 0; idx < num_points; idx++; @tile(BLOCK_SIZE, @outer, @inner))
+    {
+        u_k[idx] += alpha_k * p_k[idx];
+        r_kp1[idx] = r_k[idx] - alpha_k * q_k[idx];
+    }
+}
+
+@kernel void inner_product_flexible(DType *block, DType *r_k, DType *r_kp1, DType *z_k, const int num_points, const int num_blocks)
+{
+    for (int group = 0; group < num_blocks; ++group; @outer)
+    {
+        @shared DType theta_sum[BLOCK_SIZE];
+
+        for (int item = 0; item < BLOCK_SIZE; ++item; @inner)
+        {
+            int idx = group * BLOCK_SIZE + item;
+
+            if (idx < num_points)
+                theta_sum[item] = (r_kp1[idx] - r_k[idx]) * z_k[idx];
+            else
+                theta_sum[item] = 0.0;
+        }
+
+        for (int alive = ((BLOCK_SIZE + 1) / 2); 0 < alive; alive /= 2)
+        {
+            for (int item = 0; item < BLOCK_SIZE; ++item; @inner)
+            {
+                if (item < alive) theta_sum[item] += theta_sum[item + alive];
+            }
+        }
+
+        for (int item = 0; item < BLOCK_SIZE; ++item; @inner)
+        {
+            if (item == 0) block[group] = theta_sum[0];
+        }
+    }
+}
+
+@kernel void residual_and_search_update(DType *p_k, DType *r_k, DType *z_k, DType *r_kp1, DType beta_k, const int num_points)
+{
+    for (int idx = 0; idx < num_points; idx++; @tile(BLOCK_SIZE, @outer, @inner))
+    {
+        p_k[idx] = z_k[idx] + beta_k * p_k[idx];
+        r_k[idx] = r_kp1[idx];
+    }
+}
+
+@kernel void inner_product(DType *block, const DType *u_k, const DType *v_k, const DType *dirichlet_mask, const int num_points, const int num_blocks)
+{
+    for (int group = 0; group < num_blocks; ++group; @outer)
+    {
+        @shared DType sum[BLOCK_SIZE];
+
+        for (int item = 0; item < BLOCK_SIZE; ++item; @inner)
+        {
+            int idx = group * BLOCK_SIZE + item;
+
+            if (idx < num_points)
+                sum[item] = u_k[idx] * v_k[idx] * dirichlet_mask[idx];
+            else
+                sum[item] = 0.0;
+        }
+
+        for (int alive = ((BLOCK_SIZE + 1) / 2); 0 < alive; alive /= 2)
+        {
+            for (int item = 0; item < BLOCK_SIZE; ++item; @inner)
+            {
+                if (item < alive) sum[item] += sum[item + alive];
+            }
+        }
+
+        for (int item = 0; item < BLOCK_SIZE; ++item; @inner)
+        {
+            if (item == 0) block[group] = sum[0];
+        }
+    }
+}

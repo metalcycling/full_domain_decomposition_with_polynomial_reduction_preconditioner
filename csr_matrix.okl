@@ -1,0 +1,48 @@
+/*
+ * CSR matrix kernels
+ */
+
+@kernel void multiply(DType *Au, int *A_ptr, int *A_col, DType *A_val, DType *u, int n)
+{
+    for (int i = 0; i < n; i++; @tile(128, @outer, @inner))
+    {
+        DType Au_i = 0.0;
+
+        for (int j = A_ptr[i]; j < A_ptr[i + 1]; j++)
+        {
+            Au_i += A_val[j] * u[A_col[j]];
+        }
+
+        Au[i] = Au_i;
+    }
+}
+
+@kernel void multiply_range(DType *Au, int *A_ptr, int *A_col, DType *A_val, DType *u, int row_start, int row_end)
+{
+    for (int i = row_start; i <= row_end; i++; @tile(128, @outer, @inner))
+    {
+        DType Au_i = 0.0;
+
+        for (int j = A_ptr[i]; j < A_ptr[i + 1]; j++)
+        {
+            Au_i += A_val[j] * u[A_col[j]];
+        }
+
+        Au[i] = Au_i;
+    }
+}
+
+@kernel void multiply_weight(DType *Au, int *A_ptr, int *A_col, DType *A_val, DType *u, DType *weight, int n)
+{
+    for (int i = 0; i < n; i++; @tile(128, @outer, @inner))
+    {
+        DType Au_i = 0.0;
+
+        for (int j = A_ptr[i]; j < A_ptr[i + 1]; j++)
+        {
+            Au_i += A_val[j] * u[A_col[j]];
+        }
+
+        Au[i] = Au_i * weight[i];
+    }
+}
