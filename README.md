@@ -4,6 +4,6 @@ Preconditioner for the spectral element method (SEM) using polynomial non-confor
 
 ## Authorship
 
-Dissertation work for the PhD in Computer Science at the University of Illinois Urbana-Champaign
+Dissertation work for the PhD in Computer Science at the University of Illinois Urbana-Champaign. Full dissertation can be found [here](https://www.ideals.illinois.edu/items/126713).
 
 By: Pedro D. Bello-Maldonado
